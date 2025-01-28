@@ -169,7 +169,7 @@ void run_simulation(Bus *bus, int instructions[][4], int n) {
         }
         // Processa a instrução (log simplificado para demonstração)
         printf("Processador %d %s endereco %d com valor %d\n", proc,
-               r_w == 0 ? "lê do" : "escreve no", addr, val);
+               r_w == 0 ? "le do" : "escreve no", addr, val);
     }
 }
 
