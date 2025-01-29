@@ -335,5 +335,18 @@ int main() {
         (bus_mesi.metrics_mesi.cache_misses_mesi / (float)bus_mesi.metrics_mesi.total_instructions) * 100,
         (bus_moesi.metrics_moesi.cache_misses_moesi / (float)bus_moesi.metrics_moesi.total_instructions) * 100);
     printf("Simulacao concluida.\n");
+    FILE *file = fopen("resultados.txt", "w");
+if (file != NULL) {
+    fprintf(file, "Total_Instrucoes_MESI %d\n", bus_mesi.metrics_mesi.total_instructions);
+    fprintf(file, "Total_Instrucoes_MOESI %d\n", bus_moesi.metrics_moesi.total_instructions);
+    fprintf(file, "Cache_Misses_MESI %d\n", bus_mesi.metrics_mesi.cache_misses_mesi);
+    fprintf(file, "Cache_Misses_MOESI %d\n", bus_moesi.metrics_moesi.cache_misses_moesi);
+    fprintf(file, "Taxa_Cache_Miss_MESI %.2f\n", (bus_mesi.metrics_mesi.cache_misses_mesi / (float)bus_mesi.metrics_mesi.total_instructions) * 100);
+    fprintf(file, "Taxa_Cache_Miss_MOESI %.2f\n", (bus_moesi.metrics_moesi.cache_misses_moesi / (float)bus_moesi.metrics_moesi.total_instructions) * 100);
+    fclose(file);
+    printf("Resultados salvos em 'resultados.txt'\n");
+} else {
+    printf("Erro ao salvar os resultados!\n");
+}
     return 0;
 }
