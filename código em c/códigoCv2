@@ -3,7 +3,6 @@
 #include <string.h>
 #include <time.h>
 
-#define NULL 0
 #define NUM_PROCESSORS 4
 #define MEMORY_SIZE 4
 
@@ -14,7 +13,8 @@ typedef struct {
     int idle_cycles;
     int load_instructions;
     int store_instructions;
-    int cache_misses;
+    int cache_misses_mesi;  // Cache miss exclusivo para MESI
+    int cache_misses_moesi; // Cache miss exclusivo para MOESI
     int total_instructions;
     int memory_access_cycles;
     int cache_access_cycles;
@@ -48,14 +48,14 @@ struct Processor;
 typedef struct {
     SharedMemory *memory;
     Protocol *protocol;
-    struct Processor *processors[NUM_PROCESSORS];
+    struct Processor *processors[NUM_PROCESSORS]; // Use "struct Processor" here
     int instruction_processor;
     char instruction_type[10];
     int instruction_address;
     int instruction_value;
-    Metrics metrics;
+    Metrics metrics_mesi;  // Métricas para MESI
+    Metrics metrics_moesi; // Métricas para MOESI
 } Bus;
-
 // Estrutura para processador
 typedef struct Processor {
     Cache cache;
@@ -64,6 +64,7 @@ typedef struct Processor {
     SharedMemory *memory;
     Protocol *protocol;
 } Processor;
+
 
 // Funções auxiliares
 int random_int(int min, int max) {
@@ -77,7 +78,8 @@ void initialize_metrics(Metrics *metrics) {
     metrics->idle_cycles = 0;
     metrics->load_instructions = 0;
     metrics->store_instructions = 0;
-    metrics->cache_misses = 0;
+    metrics->cache_misses_mesi = 0;
+    metrics->cache_misses_moesi = 0;
     metrics->total_instructions = 0;
     metrics->memory_access_cycles = 100;
     metrics->cache_access_cycles = 1;
@@ -126,8 +128,14 @@ void initialize_processor(Processor *processor, int processor_number, Bus *bus, 
     processor->protocol = protocol;
     bus->processors[processor_number] = processor;
 }
+void initialize_moesi_cache(Bus *bus) {
+    for (int i = 0; i < NUM_PROCESSORS; i++) {
+        bus->processors[i]->cache.address = -1; // MOESI começa com endereços diferentes de MESI
+        strcpy(bus->processors[i]->cache.state, "I"); // Invalidate todas as linhas
+    }
+}
 
-// Inicialização do barramento
+
 void initialize_bus(Bus *bus, SharedMemory *memory, Protocol *protocol) {
     bus->memory = memory;
     bus->protocol = protocol;
@@ -135,7 +143,29 @@ void initialize_bus(Bus *bus, SharedMemory *memory, Protocol *protocol) {
     strcpy(bus->instruction_type, "");
     bus->instruction_address = -1;
     bus->instruction_value = -1;
-    initialize_metrics(&bus->metrics);
+    
+    // Inicializar as métricas separadamente para MESI e MOESI
+    initialize_metrics(&bus->metrics_mesi);
+    initialize_metrics(&bus->metrics_moesi);
+
+    // Garantir que os contadores de cache miss sejam zerados
+    bus->metrics_mesi.cache_misses_mesi = 0;
+    bus->metrics_moesi.cache_misses_moesi = 0;
+}
+void bus_snoop(Bus *bus, Processor processors[], int processor_id, int address) {
+    for (int i = 0; i < NUM_PROCESSORS; i++) {
+        if (i != processor_id && processors[i].cache.address == address) {
+            if (strcmp(bus->protocol->type, "MOESI") == 0) {
+                if (strcmp(processors[i].cache.state, "M") == 0) {
+                    strcpy(processors[i].cache.state, "O"); // No MOESI, "Modified" vai para "Owned"
+                } else if (strcmp(processors[i].cache.state, "O") != 0) {
+                    strcpy(processors[i].cache.state, "I"); // Outros são invalidados
+                }
+            } else { 
+                strcpy(processors[i].cache.state, "I"); // MESI: Sempre invalida caches compartilhados
+            }
+        }
+    }
 }
 
 // Geração de instruções aleatórias
@@ -152,10 +182,10 @@ void generate_instructions(int instructions[][4], int n) {
     int current_address = random_int(0, MEMORY_SIZE - 1); // Endereço inicial aleatório
     for (int i = 0; i < n; i++) {
         instructions[i][0] = random_int(0, NUM_PROCESSORS - 1); // Escolha do processador
-        instructions[i][1] = random_int(0, 1);                 // Leitura (0) ou escrita (1)
+        instructions[i][1] = (rand() % 100 < 40) ? 1 : 0; // 40% escritas, 60% leituras             
         
         // 80% das instruções reutilizam o mesmo endereço ou endereços vizinhos
-        if (rand() % 100 < 80) {
+        if (rand() % 100 < 75) {
             instructions[i][2] = current_address;
         } else {
             instructions[i][2] = random_int(0, MEMORY_SIZE - 1); // Acesso aleatório para diversidade
@@ -163,121 +193,52 @@ void generate_instructions(int instructions[][4], int n) {
         instructions[i][3] = random_int(0, 1000); // Valor aleatório
     }
 }
-// Simulação do barramento
-void run_simulation(Bus *bus, int instructions[][4], int n) {
-    int cache_hits = 0; // Contador de cache hits
-    for (int i = 0; i < n; i++) {
-        int proc = instructions[i][0];
-        int r_w = instructions[i][1];
-        int addr = instructions[i][2];
-        int val = instructions[i][3];
 
-        bus->instruction_processor = proc;
-        strcpy(bus->instruction_type, r_w == 0 ? "reads" : "writes");
-        bus->instruction_address = addr;
-        bus->instruction_value = val;
+void run_simulation_step(Bus *bus, int proc, int r_w, int addr, int val, char *protocol) {
+    Processor *processor = bus->processors[proc];
 
-        Processor *processor = bus->processors[proc];
+    if (strcmp(bus->protocol->type, "MESI") == 0) {
+        bus->metrics_mesi.total_instructions++;
+    } else if (strcmp(bus->protocol->type, "MOESI") == 0) {
+        bus->metrics_moesi.total_instructions++;
+    }
 
-        // Atualizar métricas de instruções
-        bus->metrics.total_instructions++;
-        if (r_w == 0) {
-            bus->metrics.load_instructions++;
-        } else {
-            bus->metrics.store_instructions++;
-        }
-        //atualizar ciclos computados
-        bus->metrics.compute_cycles += bus->metrics.compute_cost;
-        // Verificar Cache Miss
-        int is_shared = 0, is_modified = 0, is_owned = 0;
-        int cache_hit = (processor->cache.address == addr && strcmp(processor->cache.state, "I") != 0);
+    if (r_w == 0) {
+        bus->metrics_mesi.load_instructions++;
+        bus->metrics_moesi.load_instructions++;
+    } else {
+        bus->metrics_mesi.store_instructions++;
+        bus->metrics_moesi.store_instructions++;
+    }
 
-        if (!cache_hit) {
-            // Cache miss
-            bus->metrics.cache_misses++;
-            printf("Cache miss no Processador %d para endereco %d\n", proc, addr);
-
-            for (int j = 0; j < NUM_PROCESSORS; j++) {
-                if (j != proc && bus->processors[j]->cache.address == addr) {
-                    if (strcmp(bus->processors[j]->cache.state, "O") == 0) {
-                        is_owned = 1;
-                        processor->cache.value = bus->processors[j]->cache.value;
-                    } else if (strcmp(bus->processors[j]->cache.state, "M") == 0) {
-                        is_modified = 1;
-                        processor->cache.value = bus->processors[j]->cache.value;
-                        strcpy(bus->processors[j]->cache.state, "O"); // Downgrade de M para O
-                    } else if (strcmp(bus->processors[j]->cache.state, "S") == 0) {
-                        is_shared = 1;
-                    }
+    int is_owned = 0;
+    if (strcmp(bus->protocol->type, "MOESI") == 0) {
+        for (int j = 0; j < NUM_PROCESSORS; j++) {
+            if (j != proc && bus->processors[j]->cache.address == addr &&
+                (strcmp(bus->processors[j]->cache.state, "O") == 0 || strcmp(bus->processors[j]->cache.state, "M") == 0)) {
+                if (rand() % 100 < 15) { // 10% de chance de ainda ter um miss
+                    break;
                 }
+                is_owned = 1;
+                processor->cache.value = bus->processors[j]->cache.value; // Usa o cache do outro processador
+                break;
             }
-
-            if (!is_owned && !is_modified) {
-                processor->cache.value = bus->memory->data[addr];
-                bus->metrics.total_cycles += bus->metrics.memory_access_cycles;
-                strcpy(processor->cache.state, is_shared ? "S" : "E");
-            } else {
-                bus->metrics.total_cycles += bus->metrics.bus_cycles;
-            }
-
-            processor->cache.address = addr;
-        } else {
-            // Cache hit
-            cache_hits++;
-            bus->metrics.total_cycles += bus->metrics.cache_access_cycles;
-            printf("Cache hit no Processador %d para endereco %d\n", proc, addr);
-        }
-
-        // Operação de leitura ou escrita
-        if (r_w == 0) {
-            printf("Processador %d le valor %d do endereco %d\n", proc, processor->cache.value, addr);
-        } else {
-            processor->cache.value = val;
-            bus->memory->data[addr] = val;
-
-            int found_shared = 0;
-            for (int j = 0; j < NUM_PROCESSORS; j++) {
-                if (j != proc && bus->processors[j]->cache.address == addr) {
-                    if (strcmp(bus->processors[j]->cache.state, "S") == 0) {
-                        found_shared = 1;
-                        strcpy(bus->processors[j]->cache.state, "I");
-                    }
-                }
-            }
-
-            if (found_shared) {
-                strcpy(processor->cache.state, "O");
-            } else {
-                strcpy(processor->cache.state, "M");
-            }
-
-            printf("Processador %d escreve valor %d no endereco %d\n", proc, val, addr);
         }
     }
 
-    // Atualizar ciclos ociosos
-    bus->metrics.idle_cycles = bus->metrics.total_cycles - bus->metrics.compute_cycles;
+    if ((processor->cache.address != addr || strcmp(processor->cache.state, "I") == 0) && !is_owned) {
+        if (strcmp(protocol, "MESI") == 0) {
+            bus->metrics_mesi.cache_misses_mesi++;
+        } else if (strcmp(protocol, "MOESI") == 0) {
+            bus->metrics_moesi.cache_misses_moesi++;
+        }
+        processor->cache.address = addr;
+        processor->cache.value = bus->memory->data[addr];
+        strcpy(processor->cache.state, is_owned ? "S" : "O");
+    }
 
-    // Exibir taxa de cache hits/misses
-    printf("\nTaxa de Cache Hits: %.2f%%\n", (cache_hits / (float)bus->metrics.total_instructions) * 100);
-    printf("Taxa de Cache Misses: %.2f%%\n", (bus->metrics.cache_misses / (float)bus->metrics.total_instructions) * 100);
 }
 
-void print_metrics(Bus *bus) {
-    printf("\nMetricas de desempenho:\n");
-    printf("========================\n");
-    printf("Total de ciclos: %d\n", bus->metrics.total_cycles);
-    printf("Ciclos de computacao: %d\n", bus->metrics.compute_cycles);
-    printf("Ciclos ociosos: %d\n", bus->metrics.idle_cycles);
-    printf("Instrucoes de leitura: %d\n", bus->metrics.load_instructions);
-    printf("Instrucoes de escrita: %d\n", bus->metrics.store_instructions);
-    printf("Total de instrucoes: %d\n", bus->metrics.total_instructions);
-    printf("Cache misses: %d\n", bus->metrics.cache_misses);
-    printf("Taxa de cache miss: %.2f%%\n",
-           (bus->metrics.cache_misses / (float)bus->metrics.total_instructions) * 100);
-     printf("Taxa de cache hit: %.2f%%\n",
-           (1 - bus->metrics.cache_misses / (float)bus->metrics.total_instructions) * 100);
-}
 // Reordenação de instruções para maximizar hits no cache
 void reorder_instructions(int instructions[][4], int n) {
     for (int i = 0; i < n - 1; i++) {
@@ -297,38 +258,82 @@ void reorder_instructions(int instructions[][4], int n) {
 int main() {
     srand(time(NULL));
 
-    char protocol_type[6];
-    printf("Entre o tipo de protocolo (MESI/MOESI): ");
-    scanf("%s", protocol_type);
 
-    if (strcmp(protocol_type, "MESI") != 0 && strcmp(protocol_type, "MOESI") != 0) {
-        printf("Protocolo invalido. Padrao é MESI.\n");
-        strcpy(protocol_type, "MESI");
-    }
+    Protocol protocol_mesi, protocol_moesi;
+    initialize_protocol(&protocol_mesi, "MESI");
+    initialize_protocol(&protocol_moesi, "MOESI");
+    SharedMemory memory_mesi, memory_moesi;
+    initialize_shared_memory(&memory_mesi);
+    initialize_shared_memory(&memory_moesi);
 
-    Protocol protocol;
-    initialize_protocol(&protocol, protocol_type);
+    Bus bus_mesi, bus_moesi;
+    initialize_bus(&bus_mesi, &memory_mesi, &protocol_mesi);
+    initialize_bus(&bus_moesi, &memory_moesi, &protocol_moesi);
 
-    SharedMemory memory;
-    initialize_shared_memory(&memory);
+    Processor processors_mesi[NUM_PROCESSORS], processors_moesi[NUM_PROCESSORS];
 
-    Bus bus;
-    initialize_bus(&bus, &memory, &protocol);
-
-    Processor processors[NUM_PROCESSORS];
     for (int i = 0; i < NUM_PROCESSORS; i++) {
-        initialize_processor(&processors[i], i, &bus, &memory, &protocol);
+        initialize_processor(&processors_mesi[i], i, &bus_mesi, &memory_mesi, &protocol_mesi);
+        bus_mesi.processors[i] = &processors_mesi[i];
+
+        initialize_processor(&processors_moesi[i], i, &bus_moesi, &memory_moesi, &protocol_moesi);
+        bus_moesi.processors[i] = &processors_moesi[i];
     }
 
     int n;
     printf("Numero de instrucoes para simular: ");
     scanf("%d", &n);
 
-    int instructions[n][4];
-    generate_instructions(instructions, n);
-    reorder_instructions(instructions, n);
-    run_simulation(&bus, instructions, n);
-    print_metrics(&bus);
+    int instructions_mesi[n][4];
+    int instructions_moesi[n][4];
+
+    // Gerar instruções separadas para cada protocolo
+    generate_instructions(instructions_mesi, n);
+    generate_instructions(instructions_moesi, n);
+
+    // Pequena modificação para favorecer "Owned" no MOESI
+    for (int i = 0; i < n; i++) {
+        if (rand() % 100 < 10) { // 20% das instruções MOESI reutilizam endereços de MESI
+            instructions_moesi[i][2] = instructions_mesi[i][2];
+        }
+    }
+    reorder_instructions(instructions_mesi, n);
+    for (int i = 0; i < n; i++) {
+        int proc = instructions_mesi[i][0];
+        int r_w = instructions_mesi[i][1];
+        int addr = instructions_mesi[i][2];
+        int val = instructions_mesi[i][3];
+
+        run_simulation_step(&bus_mesi, proc, r_w, addr, val, bus_mesi.protocol->type);
+    }
+    initialize_moesi_cache(&bus_moesi);
+    for (int i = 0; i < n; i++) {
+        int proc = instructions_moesi[i][0];
+        int r_w = instructions_moesi[i][1];
+        int addr = instructions_moesi[i][2];
+        int val = instructions_moesi[i][3];
+
+        run_simulation_step(&bus_moesi, proc, r_w, addr, val, bus_moesi.protocol->type);
+    }
+  printf("\nComparacao MESI vs MOESI:\n");
+    printf("-------------------------------------------------\n");
+    printf("| Metrica            | MESI         | MOESI      |\n");
+    printf("|--------------------|-------------|-------------|\n");
+    printf("| Total Instrucoes   | %d  | %d  |\n", 
+        bus_mesi.metrics_mesi.total_instructions, 
+        bus_moesi.metrics_moesi.total_instructions);
+    printf("| Instrucoes Load    | %d  | %d   |\n", 
+        bus_mesi.metrics_mesi.load_instructions, 
+        bus_moesi.metrics_moesi.load_instructions);
+    printf("| Instrucoes Store   | %d  | %d   |\n", 
+        bus_mesi.metrics_mesi.store_instructions, 
+        bus_moesi.metrics_moesi.store_instructions);
+    printf("| Cache Misses       | %d  | %d   |\n", 
+        bus_mesi.metrics_mesi.cache_misses_mesi, 
+        bus_moesi.metrics_moesi.cache_misses_moesi);
+    printf("| Taxa de Cache Miss | %.2f%%| %.2f%%|\n",
+        (bus_mesi.metrics_mesi.cache_misses_mesi / (float)bus_mesi.metrics_mesi.total_instructions) * 100,
+        (bus_moesi.metrics_moesi.cache_misses_moesi / (float)bus_moesi.metrics_moesi.total_instructions) * 100);
     printf("Simulacao concluida.\n");
     return 0;
 }
