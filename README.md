@@ -1,4 +1,4 @@
-# Simulador-MOESI-e-MESI
+# Simulador-MOESI-e-MESI / GHb e Stride
 ## Copyright / License
 
 Este material é resultado de um trabalho acadêmico para a disciplina **Arquitetura de Computadores**, sob a orientação do professor **Dr. LUIZ HENRIQUE NEVES RODRIGUES**, no semestre letivo **2024.2**, do curso de **Engenharia da Computação** na Universidade Federal do Maranhão (**UFMA**).
