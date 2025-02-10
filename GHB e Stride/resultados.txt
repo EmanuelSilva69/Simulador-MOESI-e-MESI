@@ -1,0 +1,5 @@
+Taxa_Cache_Miss_Stride 19.75
+Taxa_Cache_Miss_GHB 34.55
+Cache_Misses_Stride 2961
+Cache_Misses_GHB 5181
+Total_Instrucoes 15000
